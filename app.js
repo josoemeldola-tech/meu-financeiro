@@ -13,8 +13,10 @@ const dateToday = () => {
 $('opening-date').value = dateToday();
 $('movement-date').value = dateToday();
 $('transfer-date').value = dateToday();
+$('purchase-date').value = dateToday();
 let cachedAccounts = [];
 let cachedMovements = [];
+let cachedCards = [];
 let recovering = false;
 let recoveryReady = false;
 
@@ -48,6 +50,7 @@ async function renderSession() {
     $('welcome').textContent = `Conectado como ${session.user.email}`;
     await loadAccounts();
     await loadCards();
+    await loadInvoices();
   }
 }
 
@@ -149,6 +152,8 @@ async function loadCards() {
     status('cards-status', `Erro ao consultar cartões: ${error.message}`, true);
     return;
   }
+  cachedCards = data || [];
+  refreshPurchaseCardPicker();
   status('cards-status', `${data.length} cartão(ões) encontrado(s).`);
   if (!data.length) {
     const p = document.createElement('p');
@@ -224,10 +229,141 @@ $('card-form').addEventListener('submit', async event => {
     $('card-limit').value = '0.00';
     status('card-save-status', 'Cartão cadastrado com sucesso.');
     await loadCards();
+    await loadInvoices();
   } catch (error) {
     status('card-save-status', `Erro ao cadastrar cartão: ${error.message}`, true);
   } finally {
     button.disabled = false;
+  }
+});
+
+
+function refreshPurchaseCardPicker() {
+  const picker = $('purchase-card');
+  const old = picker.value;
+  picker.replaceChildren();
+  for (const card of cachedCards.filter(card => card.ativo)) {
+    const option = document.createElement('option');
+    option.value = card.id;
+    option.textContent = `${card.nome}${card.banco ? ' — ' + card.banco : ''}`;
+    picker.append(option);
+  }
+  if (cachedCards.some(card => card.id === old && card.ativo)) picker.value = old;
+  $('purchase-save-button').disabled = !picker.options.length;
+}
+
+function monthLabel(isoDate) {
+  const [year, month] = isoDate.slice(0, 10).split('-');
+  return `${month}/${year}`;
+}
+
+async function loadInvoices() {
+  status('invoices-status', 'Carregando parcelas...');
+  const host = $('invoices-list');
+  host.replaceChildren();
+  const { data: purchases, error: purchaseError } = await supabase.from('compras_cartao')
+    .select('id,cartao_id,descricao,data_compra,valor_total,quantidade_parcelas')
+    .order('data_compra', { ascending: false }).limit(500);
+  if (purchaseError) {
+    status('invoices-status', `Erro ao consultar compras: ${purchaseError.message}`, true);
+    return;
+  }
+  if (!purchases.length) {
+    status('invoices-status', 'Nenhuma compra registrada.');
+    return;
+  }
+  if (purchases.length === 500) {
+    status('invoices-status', 'Limite de 500 compras atingido. A previsão pode estar incompleta.', true);
+    return;
+  }
+  const { data: installments, error: installmentError } = await supabase.from('parcelas_cartao')
+    .select('compra_id,numero_parcela,valor,competencia')
+    .in('compra_id', purchases.map(p => p.id))
+    .order('competencia', { ascending: true }).limit(1000);
+  if (installmentError) {
+    status('invoices-status', `Erro ao consultar parcelas: ${installmentError.message}`, true);
+    return;
+  }
+  if (installments.length === 1000) {
+    status('invoices-status', 'Limite de 1.000 parcelas atingido. A previsão pode estar incompleta.', true);
+    return;
+  }
+  const purchasesById = new Map(purchases.map(p => [p.id, p]));
+  const grouped = new Map();
+  for (const part of installments) {
+    const purchase = purchasesById.get(part.compra_id);
+    if (!purchase) continue;
+    const month = part.competencia.slice(0, 7);
+    const key = `${month}|${purchase.cartao_id}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push({ part, purchase });
+  }
+  status('invoices-status', `${purchases.length} compra(s), ${installments.length} parcela(s) encontrada(s). Previsão por competência.`);
+  for (const [key, items] of [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const [month, cardId] = key.split('|');
+    const card = cachedCards.find(c => c.id === cardId);
+    const heading = document.createElement('h3');
+    heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(items.reduce((sum, item) => sum + Number(item.part.valor), 0))}`;
+    host.append(heading);
+    const table = document.createElement('table');
+    const head = document.createElement('tr');
+    for (const title of ['Compra', 'Parcela', 'Valor']) {
+      const th = document.createElement('th'); th.textContent = title; head.append(th);
+    }
+    const thead = document.createElement('thead'); thead.append(head); table.append(thead);
+    const tbody = document.createElement('tbody');
+    for (const { part, purchase } of items) {
+      const row = document.createElement('tr');
+      for (const value of [purchase.descricao, `${part.numero_parcela}/${purchase.quantidade_parcelas}`, money(part.valor)]) {
+        const td = document.createElement('td'); td.textContent = value; row.append(td);
+      }
+      tbody.append(row);
+    }
+    table.append(tbody); host.append(table);
+  }
+}
+
+$('purchase-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('purchase-save-button');
+  const cardId = $('purchase-card').value;
+  const amount = Number($('purchase-value').value);
+  const count = Number($('purchase-installments').value);
+  if (!cachedCards.some(card => card.id === cardId && card.ativo)) {
+    status('purchase-status', 'Selecione um cartão ativo.', true); return;
+  }
+  if (!Number.isFinite(amount) || amount <= 0 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
+    status('purchase-status', 'Informe um valor positivo com até duas casas decimais.', true); return;
+  }
+  if (!Number.isInteger(count) || count < 1 || count > 24) {
+    status('purchase-status', 'Selecione entre 1 e 24 parcelas.', true); return;
+  }
+  if (Math.round(amount * 100) < count) {
+    status('purchase-status', 'O valor deve permitir parcelas de pelo menos R$ 0,01.', true); return;
+  }
+  button.disabled = true;
+  status('purchase-status', 'Registrando compra e parcelas...');
+  try {
+    const { error } = await supabase.rpc('registrar_compra_cartao', {
+      p_cartao_id: cardId,
+      p_descricao: $('purchase-description').value.trim(),
+      p_estabelecimento: $('purchase-merchant').value.trim() || null,
+      p_data_compra: $('purchase-date').value,
+      p_valor_total: amount,
+      p_quantidade_parcelas: count,
+      p_categoria: $('purchase-category').value.trim() || null,
+      p_observacoes: null
+    });
+    if (error) throw error;
+    $('purchase-form').reset();
+    $('purchase-date').value = dateToday();
+    $('purchase-installments').value = '1';
+    status('purchase-status', 'Compra e parcelas registradas com sucesso.');
+    await loadInvoices();
+  } catch (error) {
+    status('purchase-status', `Erro ao registrar compra: ${error.message}`, true);
+  } finally {
+    button.disabled = !cachedCards.some(card => card.ativo);
   }
 });
 

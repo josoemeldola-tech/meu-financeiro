@@ -47,6 +47,7 @@ async function renderSession() {
   if (logged) {
     $('welcome').textContent = `Conectado como ${session.user.email}`;
     await loadAccounts();
+    await loadCards();
   }
 }
 
@@ -90,6 +91,20 @@ async function loadAccounts() {
   if ($('transfer-from').value === $('transfer-to').value && active.length > 1) {
     $('transfer-to').value = active.find(a => a.id !== $('transfer-from').value).id;
   }
+  const cardAccount = $('card-payment-account');
+  const priorCardAccount = cardAccount.value;
+  cardAccount.replaceChildren();
+  const emptyCardAccount = document.createElement('option');
+  emptyCardAccount.value = '';
+  emptyCardAccount.textContent = 'Não definir agora';
+  cardAccount.append(emptyCardAccount);
+  for (const a of active) {
+    const option = document.createElement('option');
+    option.value = a.id;
+    option.textContent = a.nome;
+    cardAccount.append(option);
+  }
+  if (active.some(a => a.id === priorCardAccount)) cardAccount.value = priorCardAccount;
   $('transfer-save-button').disabled = active.length < 2;
   $('movement-save-button').disabled = !picker.options.length;
   const host = $('accounts'); host.replaceChildren();
@@ -121,6 +136,100 @@ async function loadAccounts() {
   }
   mt.append(mb); list.append(mt);
 }
+
+
+async function loadCards() {
+  status('cards-status', 'Carregando cartões...');
+  const { data, error } = await supabase.from('cartoes_credito')
+    .select('id,nome,banco,bandeira,ultimos_digitos,limite_total,dia_fechamento,dia_vencimento,conta_pagamento_id,ativo')
+    .order('nome');
+  const host = $('cards-list');
+  host.replaceChildren();
+  if (error) {
+    status('cards-status', `Erro ao consultar cartões: ${error.message}`, true);
+    return;
+  }
+  status('cards-status', `${data.length} cartão(ões) encontrado(s).`);
+  if (!data.length) {
+    const p = document.createElement('p');
+    p.textContent = 'Nenhum cartão cadastrado.';
+    host.append(p);
+    return;
+  }
+  const table = document.createElement('table');
+  const header = document.createElement('tr');
+  for (const title of ['Cartão', 'Limite total', 'Fechamento', 'Vencimento', 'Conta de pagamento']) {
+    const th = document.createElement('th');
+    th.textContent = title;
+    header.append(th);
+  }
+  const thead = document.createElement('thead');
+  thead.append(header);
+  table.append(thead);
+  const tbody = document.createElement('tbody');
+  for (const card of data) {
+    const row = document.createElement('tr');
+    const account = cachedAccounts.find(a => a.id === card.conta_pagamento_id);
+    const title = [card.nome, card.banco, card.bandeira, card.ultimos_digitos ? `final ${card.ultimos_digitos}` : ''].filter(Boolean).join(' — ');
+    for (const value of [title, money(card.limite_total), `Dia ${card.dia_fechamento}`, `Dia ${card.dia_vencimento}`, account?.nome || 'Não definida']) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      row.append(td);
+    }
+    tbody.append(row);
+  }
+  table.append(tbody);
+  host.append(table);
+}
+
+$('card-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('card-save-button');
+  const limit = Number($('card-limit').value);
+  const closing = Number($('card-closing').value);
+  const due = Number($('card-due').value);
+  const last4 = $('card-last4').value.trim();
+  if (!Number.isFinite(limit) || limit < 0 || Math.abs(limit * 100 - Math.round(limit * 100)) > 1e-7) {
+    status('card-save-status', 'Informe um limite válido, com até duas casas decimais.', true);
+    return;
+  }
+  if (![closing, due].every(day => Number.isInteger(day) && day >= 1 && day <= 28)) {
+    status('card-save-status', 'Informe dias entre 1 e 28.', true);
+    return;
+  }
+  if (last4 && !/^[0-9]{4}$/.test(last4)) {
+    status('card-save-status', 'Os últimos dígitos devem conter exatamente quatro números.', true);
+    return;
+  }
+  const accountId = $('card-payment-account').value || null;
+  if (accountId && !cachedAccounts.some(a => a.id === accountId && a.ativa)) {
+    status('card-save-status', 'Selecione uma conta ativa.', true);
+    return;
+  }
+  button.disabled = true;
+  status('card-save-status', 'Salvando cartão...');
+  try {
+    const { error } = await supabase.from('cartoes_credito').insert({
+      nome: $('card-name').value.trim(),
+      banco: $('card-bank').value.trim() || null,
+      bandeira: $('card-brand').value.trim() || null,
+      ultimos_digitos: last4 || null,
+      limite_total: limit,
+      dia_fechamento: closing,
+      dia_vencimento: due,
+      conta_pagamento_id: accountId
+    });
+    if (error) throw error;
+    $('card-form').reset();
+    $('card-limit').value = '0.00';
+    status('card-save-status', 'Cartão cadastrado com sucesso.');
+    await loadCards();
+  } catch (error) {
+    status('card-save-status', `Erro ao cadastrar cartão: ${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $('transfer-form').addEventListener('submit', async event => {
   event.preventDefault();

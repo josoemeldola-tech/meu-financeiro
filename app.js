@@ -11,6 +11,9 @@ const dateToday = () => {
 };
 
 $('opening-date').value = dateToday();
+$('movement-date').value = dateToday();
+let cachedAccounts = [];
+let cachedMovements = [];
 let recovering = false;
 let recoveryReady = false;
 
@@ -50,40 +53,79 @@ async function loadAccounts() {
   status('account-status', 'Carregando contas...');
   const { data, error } = await supabase.from('contas_financeiras')
     .select('id,nome,instituicao,tipo,saldo_inicial,data_saldo_inicial,ativa').order('nome');
-  if (error) {
-    status('account-status', `Não foi possível carregar as contas: ${error.message}`, true);
-    return;
+  if (error) { status('account-status', `Erro ao consultar contas: ${error.message}`, true); return; }
+  cachedAccounts = data || [];
+  const { data: movements, error: movementError } = await supabase.from('movimentacoes_financeiras')
+    .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria')
+    .in('tipo', ['receita', 'despesa']).order('data_movimentacao', { ascending: false }).limit(1000);
+  if (movementError) {
+    status('movement-list-status', `Erro ao consultar movimentações: ${movementError.message}`, true);
+    cachedMovements = [];
+    status('account-status', 'Saldos indisponíveis: não foi possível consultar as movimentações.', true);
+  } else {
+    cachedMovements = movements || [];
+    status('movement-list-status', cachedMovements.length === 1000 ? 'Exibindo até 1.000 movimentações. Saldos não devem ser considerados completos.' : `${cachedMovements.length} movimentação(ões) registrada(s).`, cachedMovements.length === 1000);
   }
-  const host = $('accounts');
-  host.replaceChildren();
-  if (!data.length) {
-    status('account-status', 'Nenhuma conta cadastrada.');
-    return;
+  const picker = $('movement-account');
+  const previous = picker.value;
+  picker.replaceChildren();
+  for (const a of cachedAccounts.filter(a => a.ativa)) {
+    const option = document.createElement('option'); option.value = a.id; option.textContent = a.nome; picker.append(option);
   }
-  status('account-status', `${data.length} conta(s) encontrada(s).`);
+  if (cachedAccounts.some(a => a.id === previous && a.ativa)) picker.value = previous;
+  $('movement-save-button').disabled = !picker.options.length;
+  const host = $('accounts'); host.replaceChildren();
+  if (!cachedAccounts.length) { status('account-status', 'Nenhuma conta cadastrada.'); $('movements').replaceChildren(); return; }
+  if (!movementError) status('account-status', `${cachedAccounts.length} conta(s) encontrada(s).`);
   const table = document.createElement('table');
-  const head = document.createElement('thead');
-  const headerRow = document.createElement('tr');
-  for (const title of ['Conta', 'Tipo', 'Saldo inicial']) {
-    const th = document.createElement('th');
-    th.textContent = title;
-    headerRow.append(th);
-  }
-  head.append(headerRow);
-  table.append(head);
+  const head = document.createElement('thead'); const headerRow = document.createElement('tr');
+  for (const title of ['Conta', 'Tipo', 'Saldo calculado']) { const th = document.createElement('th'); th.textContent = title; headerRow.append(th); }
+  head.append(headerRow); table.append(head);
   const body = document.createElement('tbody');
-  for (const account of data) {
+  for (const a of cachedAccounts) {
     const row = document.createElement('tr');
-    for (const value of [account.nome + (account.instituicao ? ' — ' + account.instituicao : ''), account.tipo, money(account.saldo_inicial)]) {
-      const cell = document.createElement('td');
-      cell.textContent = value;
-      row.append(cell);
-    }
+    const cents = Math.round(Number(a.saldo_inicial) * 100) + cachedMovements.filter(m => m.conta_id === a.id).reduce((total,m) => total + (m.tipo === 'receita' ? 1 : -1) * Math.round(Number(m.valor) * 100), 0);
+    for (const value of [a.nome + (a.instituicao ? ' — ' + a.instituicao : ''), a.tipo, movementError ? 'Indisponível' : money(cents / 100)]) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
     body.append(row);
   }
-  table.append(body);
-  host.append(table);
+  table.append(body); host.append(table);
+  const list = $('movements'); list.replaceChildren();
+  if (movementError) return;
+  if (!cachedMovements.length) { const p = document.createElement('p'); p.textContent = 'Nenhuma movimentação cadastrada.'; list.append(p); return; }
+  const mt = document.createElement('table'); const mh = document.createElement('thead'); const mr = document.createElement('tr');
+  for (const t of ['Data','Conta','Descrição','Tipo','Valor']) { const th = document.createElement('th'); th.textContent = t; mr.append(th); }
+  mh.append(mr); mt.append(mh); const mb = document.createElement('tbody');
+  for (const m of cachedMovements.slice(0,50)) {
+    const row = document.createElement('tr');
+    const a = cachedAccounts.find(a => a.id === m.conta_id);
+    for (const value of [m.data_movimentacao?.split('-').reverse().join('/') || '', a?.nome || 'Conta não encontrada', m.descricao, m.tipo === 'receita' ? 'Receita' : 'Despesa', `${m.tipo === 'despesa' ? '−' : '+'} ${money(m.valor)}`]) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
+    mb.append(row);
+  }
+  mt.append(mb); list.append(mt);
 }
+
+$('movement-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('movement-save-button'); button.disabled = true;
+  status('movement-save-status', 'Salvando movimentação...');
+  try {
+    const value = Number($('movement-value').value);
+    if (!Number.isFinite(value) || value <= 0 || Math.abs(value * 100 - Math.round(value * 100)) > 1e-7) throw Error('Informe um valor positivo com até duas casas decimais.');
+    const accountId = $('movement-account').value;
+    if (!cachedAccounts.some(a => a.id === accountId && a.ativa)) throw Error('Selecione uma conta ativa.');
+    const { error } = await supabase.from('movimentacoes_financeiras').insert({
+      conta_id: accountId, tipo: $('movement-type').value,
+      descricao: $('movement-description').value.trim(), valor: value,
+      data_movimentacao: $('movement-date').value,
+      categoria: $('movement-category').value.trim() || null
+    });
+    if (error) throw error;
+    $('movement-form').reset(); $('movement-date').value = dateToday();
+    status('movement-save-status', 'Movimentação salva com sucesso.');
+    await loadAccounts();
+  } catch (error) { status('movement-save-status', `Erro: ${error.message}`, true); }
+  finally { button.disabled = !cachedAccounts.some(a => a.ativa); }
+});
 
 $('login-form').addEventListener('submit', async event => {
   event.preventDefault();

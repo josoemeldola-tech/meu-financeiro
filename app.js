@@ -14,6 +14,7 @@ $('opening-date').value = dateToday();
 $('movement-date').value = dateToday();
 $('transfer-date').value = dateToday();
 $('purchase-date').value = dateToday();
+$('payment-date').value = dateToday();
 let cachedAccounts = [];
 let cachedMovements = [];
 let cachedCards = [];
@@ -62,7 +63,8 @@ async function loadAccounts() {
   cachedAccounts = data || [];
   const { data: movements, error: movementError } = await supabase.from('movimentacoes_financeiras')
     .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria,direcao_transferencia,transferencia_id')
-  .in('tipo', ['receita', 'despesa', 'transferencia', 'pagamento_cartao'])
+    .in('tipo', ['receita', 'despesa', 'transferencia', 'pagamento_cartao'])
+    .order('data_movimentacao', { ascending: false }).limit(1000);
   if (movementError) {
     status('movement-list-status', `Erro ao consultar movimentações: ${movementError.message}`, true);
     cachedMovements = [];
@@ -134,7 +136,7 @@ async function loadAccounts() {
   for (const m of cachedMovements.slice(0,50)) {
     const row = document.createElement('tr');
     const a = cachedAccounts.find(a => a.id === m.conta_id);
-    for (const value of [m.data_movimentacao?.split('-').reverse().join('/') || '', a?.nome || 'Conta não encontrada', m.descricao, m.tipo === 'transferencia' ? (m.direcao_transferencia === 'entrada' ? 'Transferência recebida' : 'Transferência enviada') : m.tipo === 'receita' ? 'Receita' : 'Despesa', `${m.tipo === 'despesa' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'saida') ? '−' : '+'} ${money(m.valor)}`]) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
+    for (const value of [m.data_movimentacao?.split('-').reverse().join('/') || '', a?.nome || 'Conta não encontrada', m.descricao, m.tipo === 'transferencia' ? (m.direcao_transferencia === 'entrada' ? 'Transferência recebida' : 'Transferência enviada') : m.tipo === 'receita' ? 'Receita' : m.tipo === 'pagamento_cartao' ? 'Pagamento de fatura' : 'Despesa', `${m.tipo === 'receita' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'entrada') ? '+' : '−'} ${money(m.valor)}`]) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
     mb.append(row);
   }
   mt.append(mb); list.append(mt);
@@ -269,6 +271,7 @@ async function loadInvoices() {
     return;
   }
   if (!purchases.length) {
+    $('payment-form').hidden = true;
     status('invoices-status', 'Nenhuma compra registrada.');
     return;
   }
@@ -288,6 +291,19 @@ async function loadInvoices() {
     status('invoices-status', 'Limite de 1.000 parcelas atingido. A previsão pode estar incompleta.', true);
     return;
   }
+  const { data: payments, error: paymentsError } = await supabase.from('pagamentos_fatura')
+    .select('id,cartao_id,competencia,valor,data_pagamento,conta_id')
+    .order('data_pagamento', { ascending: false }).limit(1000);
+  if (paymentsError) {
+    status('invoices-status', `Erro ao consultar pagamentos: ${paymentsError.message}`, true);
+    $('payment-form').hidden = true;
+    return;
+  }
+  if (payments.length === 1000) {
+    status('invoices-status', 'Limite de pagamentos atingido; não é seguro calcular saldos de faturas.', true);
+    $('payment-form').hidden = true;
+    return;
+  }
   const purchasesById = new Map(purchases.map(p => [p.id, p]));
   const grouped = new Map();
   for (const part of installments) {
@@ -298,12 +314,39 @@ async function loadInvoices() {
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push({ part, purchase });
   }
-  status('invoices-status', `${purchases.length} compra(s), ${installments.length} parcela(s) encontrada(s). Previsão por competência.`);
+  status('invoices-status', `${purchases.length} compra(s), ${installments.length} parcela(s) encontrada(s). Valores por competência.`);
+  const paymentPicker = $('payment-invoice');
+  const previousInvoice = paymentPicker.value;
+  paymentPicker.replaceChildren();
+  const paymentAccount = $('payment-account');
+  const previousAccount = paymentAccount.value;
+  paymentAccount.replaceChildren();
+  for (const account of cachedAccounts.filter(a => a.ativa)) {
+    const option = document.createElement('option');
+    option.value = account.id;
+    option.textContent = account.nome;
+    paymentAccount.append(option);
+  }
+  if (cachedAccounts.some(a => a.id === previousAccount && a.ativa)) paymentAccount.value = previousAccount;
+  let outstandingInvoices = 0;
   for (const [key, items] of [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const [month, cardId] = key.split('|');
     const card = cachedCards.find(c => c.id === cardId);
     const heading = document.createElement('h3');
-    heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(items.reduce((sum, item) => sum + Number(item.part.valor), 0))}`;
+    const totalCents = items.reduce((sum, item) => sum + Math.round(Number(item.part.valor) * 100), 0);
+    const paidCents = payments.filter(p => p.cartao_id === cardId && p.competencia.slice(0, 7) === month)
+      .reduce((sum, payment) => sum + Math.round(Number(payment.valor) * 100), 0);
+    const remainingCents = totalCents - paidCents;
+    heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(totalCents / 100)}`;
+    if (remainingCents > 0 && card?.ativo) {
+      outstandingInvoices++;
+      const option = document.createElement('option');
+      option.value = `${cardId}|${month}-01`;
+      option.dataset.remainingCents = String(remainingCents);
+      option.dataset.defaultAccount = card.conta_pagamento_id || '';
+      option.textContent = `${card.nome} — ${monthLabel(month + '-01')} — falta ${money(remainingCents / 100)}`;
+      paymentPicker.append(option);
+    }
     host.append(heading);
     const table = document.createElement('table');
     const head = document.createElement('tr');
@@ -320,8 +363,73 @@ async function loadInvoices() {
       tbody.append(row);
     }
     table.append(tbody); host.append(table);
+    const summary = document.createElement('p');
+    summary.className = 'note';
+    summary.textContent = `Pago: ${money(paidCents / 100)} · Restante: ${money(remainingCents / 100)}`;
+    host.append(summary);
   }
+  if ([...paymentPicker.options].some(o => o.value === previousInvoice)) paymentPicker.value = previousInvoice;
+  $('payment-form').hidden = !outstandingInvoices || !paymentAccount.options.length;
+  $('payment-save-button').disabled = !outstandingInvoices || !paymentAccount.options.length;
+  syncPaymentSelection();
 }
+
+let pendingPaymentKey = null;
+function syncPaymentSelection() {
+  const selected = $('payment-invoice').selectedOptions[0];
+  if (!selected) return;
+  $('payment-value').value = (Number(selected.dataset.remainingCents) / 100).toFixed(2);
+  const preferred = selected.dataset.defaultAccount;
+  if (preferred && [...$('payment-account').options].some(o => o.value === preferred)) $('payment-account').value = preferred;
+}
+$('payment-invoice').addEventListener('change', () => { pendingPaymentKey = null; syncPaymentSelection(); });
+for (const id of ['payment-account', 'payment-value', 'payment-date']) {
+  $(id).addEventListener('change', () => { pendingPaymentKey = null; });
+}
+$('payment-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const selected = $('payment-invoice').selectedOptions[0];
+  if (!selected) return;
+  const [cardId, competence] = selected.value.split('|');
+  const accountId = $('payment-account').value;
+  const amount = Number($('payment-value').value);
+  const remainingCents = Number(selected.dataset.remainingCents);
+  const amountCents = Math.round(amount * 100);
+  if (!cachedAccounts.some(a => a.id === accountId && a.ativa)) {
+    status('payment-status', 'Escolha uma conta bancária ativa.', true); return;
+  }
+  if (!Number.isFinite(amount) || amountCents <= 0 || Math.abs(amount * 100 - amountCents) > 1e-7 || amountCents > remainingCents) {
+    status('payment-status', 'Valor inválido ou superior ao saldo da fatura.', true); return;
+  }
+  const date = $('payment-date').value;
+  if (!date) { status('payment-status', 'Informe a data do pagamento.', true); return; }
+  const confirmation = `Confirmar pagamento de ${money(amount)} da fatura ${monthLabel(competence)} com a conta ${$('payment-account').selectedOptions[0].textContent}? O saldo bancário será reduzido.`;
+  if (!window.confirm(confirmation)) return;
+  const button = $('payment-save-button');
+  button.disabled = true;
+  pendingPaymentKey ||= crypto.randomUUID();
+  status('payment-status', 'Registrando pagamento...');
+  try {
+    const { error } = await supabase.rpc('registrar_pagamento_fatura', {
+      p_cartao_id: cardId,
+      p_competencia: competence,
+      p_conta_id: accountId,
+      p_valor: amount,
+      p_data_pagamento: date,
+      p_chave_operacao: pendingPaymentKey,
+      p_observacoes: null
+    });
+    if (error) throw error;
+    pendingPaymentKey = null;
+    status('payment-status', 'Pagamento registrado. Saldo e fatura atualizados.');
+    await loadAccounts();
+    await loadInvoices();
+  } catch (error) {
+    status('payment-status', `Erro ao pagar fatura: ${error.message}. Antes de tentar novamente, confira se o pagamento já aparece na fatura.`, true);
+  } finally {
+    button.disabled = $('payment-form').hidden;
+  }
+});
 
 $('purchase-form').addEventListener('submit', async event => {
   event.preventDefault();

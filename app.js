@@ -8,7 +8,26 @@ const dateToday = () => {const d=new Date(); return `${d.getFullYear()}-${String
 $('opening-date').value = dateToday();
 function status(id,message,isError=false){const el=$(id);el.textContent=message;el.className=isError?'error':'success'}
 
-$('logout').style.display=logged?'inline-block':'none';
+async function renderSession() {
+  const { data: { session }, error } =
+    await supabase.auth.getSession();
+
+  if (error) {
+    status('login-status', error.message, true);
+  }
+
+  const logged = !!session;
+
+  $('login').style.display = logged ? 'none' : 'block';
+  $('app').style.display = logged ? 'block' : 'none';
+  $('logout').style.display = logged ? 'inline-block' : 'none';
+
+  if (logged) {
+    $('welcome').textContent =
+      `Conectado como ${session.user.email}`;
+    await loadAccounts();
+  }
+}
 
 async function loadAccounts(){status('account-status','Carregando contas...');const {data,error}=await supabase.from('contas_financeiras').select('id,nome,instituicao,tipo,saldo_inicial,data_saldo_inicial,ativa').order('nome');if(error){status('account-status',`Não foi possível carregar as contas: ${error.message}`,true);return}const host=$('accounts');host.replaceChildren();if(!data.length){status('account-status','Nenhuma conta cadastrada.');return}status('account-status',`${data.length} conta(s) encontrada(s).`);const table=document.createElement('table');const head=document.createElement('thead');const tr=document.createElement('tr');for(const t of ['Conta','Tipo','Saldo inicial']){const th=document.createElement('th');th.textContent=t;tr.append(th)}head.append(tr);table.append(head);const body=document.createElement('tbody');for(const a of data){const row=document.createElement('tr');for(const val of [a.nome+(a.instituicao?' — '+a.instituicao:''),a.tipo,money(a.saldo_inicial)]){const cell=document.createElement('td');cell.textContent=val;row.append(cell)}body.append(row)}table.append(body);host.append(table)}
 $('login-form').addEventListener('submit',async e=>{e.preventDefault();$('login-button').disabled=true;status('login-status','Entrando...');try{const {error}=await supabase.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error)throw error;$('password').value='';status('login-status','');await renderSession()}catch(err){status('login-status',`Falha no login: ${err.message}`,true)}finally{$('login-button').disabled=false}});

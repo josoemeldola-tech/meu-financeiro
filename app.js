@@ -62,7 +62,7 @@ async function loadAccounts() {
   cachedAccounts = data || [];
   const { data: movements, error: movementError } = await supabase.from('movimentacoes_financeiras')
     .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria,direcao_transferencia,transferencia_id')
-    .in('tipo', ['receita', 'despesa', 'transferencia']).order('data_movimentacao', { ascending: false }).limit(1000);
+  .in('tipo', ['receita', 'despesa', 'transferencia', 'pagamento_cartao'])
   if (movementError) {
     status('movement-list-status', `Erro ao consultar movimentações: ${movementError.message}`, true);
     cachedMovements = [];

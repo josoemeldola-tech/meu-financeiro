@@ -1,13 +1,8 @@
-MEU FINANCEIRO - primeira versão de testes
+MEU FINANCEIRO — VERSÃO 10
 
-Arquivos: index.html, app.js, manifest.webmanifest, icon.svg.
+1. Extraia este ZIP.
+2. Envie os arquivos extraídos à raiz do repositório GitHub Pages, substituindo os existentes.
+3. Faça Commit changes.
+4. Abra o aplicativo e pressione Ctrl+Shift+R.
 
-Publicação futura: criar repositório GitHub público sem dados privados, enviar estes arquivos e habilitar GitHub Pages na branch main / (root).
-
-A Publishable key e a URL do Supabase são públicas por definição. NUNCA adicionar service_role, secret keys ou senha do banco.
-
-O login utiliza Supabase Auth. O cadastro público de usuários deve permanecer desativado. A segurança depende das políticas RLS do banco e das funções privilegiadas, que ainda precisam de revisão e testes reais.
-
-Esta versão permite login, listar contas e cadastrar contas. Não calcula saldos atualizados, não possui movimentações, cartões, importação ou backup. NÃO UTILIZAR DADOS FINANCEIROS REAIS AINDA.
-
-Para testar corretamente, hospedar via HTTPS (ex.: GitHub Pages). Não abrir o arquivo diretamente pelo caminho file://.
+O painel apresenta saldos, receitas, saídas, faturas e projeção simplificada. Valores pagos de faturas aparecem em azul. Não exige SQL.

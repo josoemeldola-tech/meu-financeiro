@@ -20,6 +20,87 @@ let cachedMovements = [];
 let cachedCards = [];
 let recovering = false;
 let recoveryReady = false;
+let dashboardAccountsReady = false;
+let dashboardInvoicesReady = false;
+let dashboardInvoices = [];
+let dashboardInvoiceTotalCents = 0;
+function dashboardBalanceClass(cents) { return cents < 0 ? 'balance-negative' : cents > 0 ? 'balance-positive' : 'balance-zero'; }
+function renderDashboard() {
+  const host = $('finance-dashboard');
+  if (!host) return;
+  host.replaceChildren();
+  if (!dashboardAccountsReady || !dashboardInvoicesReady) {
+    host.textContent = 'Aguardando dados completos de contas e faturas...';
+    return;
+  }
+  const today = dateToday();
+  const month = today.slice(0,7);
+  const balances = cachedAccounts.map(a => calculatedAccountBalanceCents(a.id));
+  if (balances.some(v => v === null)) {
+    host.textContent = 'Resumo indisponível: saldos incompletos. Confira as movimentações.';
+    return;
+  }
+  const balanceCents = balances.reduce((sum,v)=>sum+v,0);
+  let incomeCents = 0, expenseCents = 0;
+  for (const m of cachedMovements) {
+    if (m.data_movimentacao?.slice(0,7) !== month) continue;
+    const value = Math.round(Number(m.valor)*100);
+    if (m.tipo === 'receita') incomeCents += value;
+    else if (m.tipo === 'despesa' || m.tipo === 'pagamento_cartao') expenseCents += value;
+  }
+  const grid = document.createElement('div'); grid.className = 'dashboard-grid';
+  for (const [label, cents, cls] of [
+    ['Saldo total das contas',balanceCents,dashboardBalanceClass(balanceCents)],
+    ['Receitas do mês',incomeCents,'balance-positive'],
+    ['Saídas do mês',expenseCents,'balance-negative'],
+    ['Faturas pendentes',dashboardInvoiceTotalCents,'balance-zero']
+  ]) {
+    const card = document.createElement('div');card.className='dashboard-metric';
+    const title = document.createElement('span');title.className='metric-label';title.textContent=label;
+    const value = document.createElement('span');value.className='metric-value '+cls;value.textContent=money(cents/100);
+    card.append(title,value);grid.append(card);
+  }
+  host.append(grid);
+  const heading = document.createElement('h3');heading.textContent='Receitas e saídas — '+monthLabel(month+'-01');host.append(heading);
+  const chart = document.createElement('div');chart.className='dashboard-chart';chart.setAttribute('role','img');
+  chart.setAttribute('aria-label',`Receitas ${money(incomeCents/100)}; saídas ${money(expenseCents/100)}.`);
+  const max=Math.max(incomeCents,expenseCents,1);
+  for(const [label,cents,kind] of [['Receitas',incomeCents,'income'],['Saídas',expenseCents,'expense']]){
+    const item=document.createElement('div');item.className='chart-item';
+    const val=document.createElement('span');val.className='chart-value';val.textContent=money(cents/100);
+    const bar=document.createElement('div');bar.className='chart-bar '+kind;bar.style.height=`${Math.max(3,Math.round(cents/max*110))}px`;
+    const name=document.createElement('span');name.className='chart-label';name.textContent=label;
+    item.append(val,bar,name);chart.append(item);
+  }
+  host.append(chart);
+  const projectionHeading=document.createElement('h3');projectionHeading.textContent='Projeção simplificada — próximos 3 meses';host.append(projectionHeading);
+  const note=document.createElement('p');note.className='note';note.textContent='Estimativa: saldo atual menos faturas ainda não pagas até cada mês. Não inclui receitas, despesas ou outras obrigações futuras. Não é previsão de saldo bancário real.';host.append(note);
+  const table=document.createElement('table');const thead=document.createElement('thead');const tr=document.createElement('tr');
+  for(const t of ['Mês','Faturas a pagar no mês','Saldo estimado acumulado']){const th=document.createElement('th');th.textContent=t;tr.append(th);}thead.append(tr);table.append(thead);
+  const tbody=document.createElement('tbody');
+  let running=balanceCents;
+  // Valores vencidos ou do mês atual reduzem a base da projeção inicial.
+  const overdue=dashboardInvoices.filter(i=>i.month<=month).reduce((s,i)=>s+i.remainingCents,0);
+  running-=overdue;
+  for(let offset=1;offset<=3;offset++){
+    const [y,m]=month.split('-').map(Number);
+    const dt=new Date(y,m-1+offset,1);
+    const key=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`;
+    const due=dashboardInvoices.filter(i=>i.month===key).reduce((s,i)=>s+i.remainingCents,0);
+    running-=due;
+    const row=document.createElement('tr');
+    for(const [i,v] of [monthLabel(key+'-01'),money(due/100),money(running/100)].entries()){
+      const cell=document.createElement('td');cell.textContent=v;
+      if(i===2)cell.className=dashboardBalanceClass(running);
+      row.append(cell);
+    }
+    tbody.append(row);
+  }
+  table.append(tbody);host.append(table);
+  if(overdue>0){const warning=document.createElement('p');warning.className='note';warning.textContent=`A projeção também desconta ${money(overdue/100)} de faturas pendentes até o mês atual.`;host.append(warning);}
+  const foot=document.createElement('p');foot.className='note';foot.textContent='Saídas incluem despesas e pagamentos de fatura, sem contar compras no cartão duas vezes. Transferências entre contas não entram em receitas nem saídas.';host.append(foot);
+}
+
 
 function status(id, message, isError = false) {
   const el = $(id);
@@ -59,7 +140,7 @@ async function loadAccounts() {
   status('account-status', 'Carregando contas...');
   const { data, error } = await supabase.from('contas_financeiras')
     .select('id,nome,instituicao,tipo,saldo_inicial,data_saldo_inicial,ativa').order('nome');
-  if (error) { status('account-status', `Erro ao consultar contas: ${error.message}`, true); return; }
+  if (error) { dashboardAccountsReady = false; renderDashboard(); status('account-status', `Erro ao consultar contas: ${error.message}`, true); return; }
   cachedAccounts = data || [];
   const { data: movements, error: movementError } = await supabase.from('movimentacoes_financeiras')
     .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria,direcao_transferencia,transferencia_id')
@@ -68,6 +149,7 @@ async function loadAccounts() {
   if (movementError) {
     status('movement-list-status', `Erro ao consultar movimentações: ${movementError.message}`, true);
     cachedMovements = [];
+    dashboardAccountsReady = false; renderDashboard();
     status('account-status', 'Saldos indisponíveis: não foi possível consultar as movimentações.', true);
   } else {
     cachedMovements = movements || [];
@@ -112,6 +194,8 @@ async function loadAccounts() {
   if (active.some(a => a.id === priorCardAccount)) cardAccount.value = priorCardAccount;
   $('transfer-save-button').disabled = active.length < 2;
   $('movement-save-button').disabled = !picker.options.length;
+  dashboardAccountsReady = !movementError && cachedMovements.length < 1000;
+  renderDashboard();
   const host = $('accounts'); host.replaceChildren();
   if (!cachedAccounts.length) { status('account-status', 'Nenhuma conta cadastrada.'); $('movements').replaceChildren(); return; }
   if (!movementError) status('account-status', `${cachedAccounts.length} conta(s) encontrada(s).`);
@@ -263,6 +347,7 @@ async function loadInvoices() {
   status('invoices-status', 'Carregando parcelas...');
   const host = $('invoices-list');
   host.replaceChildren();
+  dashboardInvoicesReady = false; dashboardInvoices = []; dashboardInvoiceTotalCents = 0; renderDashboard();
   const { data: purchases, error: purchaseError } = await supabase.from('compras_cartao')
     .select('id,cartao_id,descricao,data_compra,valor_total,quantidade_parcelas')
     .order('data_compra', { ascending: false }).limit(500);
@@ -273,6 +358,7 @@ async function loadInvoices() {
   if (!purchases.length) {
     $('payment-form').hidden = true;
     status('invoices-status', 'Nenhuma compra registrada.');
+    dashboardInvoicesReady = true; renderDashboard();
     return;
   }
   if (purchases.length === 500) {
@@ -337,6 +423,7 @@ async function loadInvoices() {
     const paidCents = payments.filter(p => p.cartao_id === cardId && p.competencia.slice(0, 7) === month)
       .reduce((sum, payment) => sum + Math.round(Number(payment.valor) * 100), 0);
     const remainingCents = totalCents - paidCents;
+    if (remainingCents > 0) { dashboardInvoices.push({month,remainingCents}); dashboardInvoiceTotalCents += remainingCents; }
     heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(totalCents / 100)} — ${remainingCents <= 0 ? 'PAGA' : paidCents > 0 ? 'PARCIALMENTE PAGA' : 'PENDENTE'}`;
     if (remainingCents > 0 && card?.ativo) {
       outstandingInvoices++;
@@ -365,7 +452,9 @@ async function loadInvoices() {
     table.append(tbody); host.append(table);
     const summary = document.createElement('p');
     summary.className = 'note';
-    summary.textContent = `Pago: ${money(paidCents / 100)} · Restante: ${money(remainingCents / 100)}`;
+    const paidSpan = document.createElement('span'); paidSpan.className = 'invoice-paid'; paidSpan.textContent = `Pago: ${money(paidCents / 100)}`;
+    const remainingSpan = document.createElement('span'); remainingSpan.textContent = ` · Restante: ${money(remainingCents / 100)}`;
+    summary.append(paidSpan,remainingSpan);
     host.append(summary);
   }
   if ([...paymentPicker.options].some(o => o.value === previousInvoice)) paymentPicker.value = previousInvoice;
@@ -373,6 +462,7 @@ async function loadInvoices() {
   $('payment-save-button').disabled = !outstandingInvoices || !paymentAccount.options.length;
   syncPaymentSelection();
   refreshPaymentBalancePreview();
+  dashboardInvoicesReady = true; renderDashboard();
 }
 
 function calculatedAccountBalanceCents(accountId) {

@@ -123,7 +123,7 @@ async function loadAccounts() {
   for (const a of cachedAccounts) {
     const row = document.createElement('tr');
     const cents = Math.round(Number(a.saldo_inicial) * 100) + cachedMovements.filter(m => m.conta_id === a.id).reduce((total,m) => total + (m.tipo === 'receita' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'entrada') ? 1 : -1) * Math.round(Number(m.valor) * 100), 0);
-    for (const value of [a.nome + (a.instituicao ? ' — ' + a.instituicao : ''), a.tipo, movementError ? 'Indisponível' : money(cents / 100)]) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
+    for (const [index, value] of [a.nome + (a.instituicao ? ' — ' + a.instituicao : ''), a.tipo, movementError ? 'Indisponível' : money(cents / 100)].entries()) { const cell = document.createElement('td'); cell.textContent = value; if (index === 2 && !movementError) cell.classList.add(cents < 0 ? 'balance-negative' : cents > 0 ? 'balance-positive' : 'balance-zero'); row.append(cell); }
     body.append(row);
   }
   table.append(body); host.append(table);
@@ -337,7 +337,7 @@ async function loadInvoices() {
     const paidCents = payments.filter(p => p.cartao_id === cardId && p.competencia.slice(0, 7) === month)
       .reduce((sum, payment) => sum + Math.round(Number(payment.valor) * 100), 0);
     const remainingCents = totalCents - paidCents;
-    heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(totalCents / 100)}`;
+    heading.textContent = `${card?.nome || 'Cartão'} — ${monthLabel(month + '-01')} — ${money(totalCents / 100)} — ${remainingCents <= 0 ? 'PAGA' : paidCents > 0 ? 'PARCIALMENTE PAGA' : 'PENDENTE'}`;
     if (remainingCents > 0 && card?.ativo) {
       outstandingInvoices++;
       const option = document.createElement('option');
@@ -372,6 +372,30 @@ async function loadInvoices() {
   $('payment-form').hidden = !outstandingInvoices || !paymentAccount.options.length;
   $('payment-save-button').disabled = !outstandingInvoices || !paymentAccount.options.length;
   syncPaymentSelection();
+  refreshPaymentBalancePreview();
+}
+
+function calculatedAccountBalanceCents(accountId) {
+  const account = cachedAccounts.find(a => a.id === accountId);
+  if (!account || cachedMovements.length >= 1000) return null;
+  return Math.round(Number(account.saldo_inicial) * 100) + cachedMovements
+    .filter(m => m.conta_id === accountId)
+    .reduce((sum, m) => sum + (m.tipo === 'receita' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'entrada') ? 1 : -1) * Math.round(Number(m.valor) * 100), 0);
+}
+function refreshPaymentBalancePreview() {
+  const accountId = $('payment-account').value;
+  const amount = Number($('payment-value').value);
+  const preview = $('payment-balance-preview');
+  preview.className = 'note';
+  if (!accountId || !Number.isFinite(amount) || amount <= 0) { preview.textContent = ''; return; }
+  const cents = calculatedAccountBalanceCents(accountId);
+  if (cents === null) {
+    preview.textContent = 'Saldo não disponível para previsão. Confira a conta antes de confirmar.';
+    return;
+  }
+  const projected = cents - Math.round(amount * 100);
+  preview.textContent = `Saldo atual: ${money(cents / 100)} · Após pagamento: ${money(projected / 100)}${projected < 0 ? ' — Atenção: saldo negativo permitido.' : ''}`;
+  if (projected < 0) preview.className = 'note balance-negative';
 }
 
 let pendingPaymentKey = null;
@@ -381,10 +405,12 @@ function syncPaymentSelection() {
   $('payment-value').value = (Number(selected.dataset.remainingCents) / 100).toFixed(2);
   const preferred = selected.dataset.defaultAccount;
   if (preferred && [...$('payment-account').options].some(o => o.value === preferred)) $('payment-account').value = preferred;
+  refreshPaymentBalancePreview();
 }
 $('payment-invoice').addEventListener('change', () => { pendingPaymentKey = null; syncPaymentSelection(); });
 for (const id of ['payment-account', 'payment-value', 'payment-date']) {
-  $(id).addEventListener('change', () => { pendingPaymentKey = null; });
+  $(id).addEventListener('change', () => { pendingPaymentKey = null; refreshPaymentBalancePreview(); });
+  if (id === 'payment-value') $(id).addEventListener('input', refreshPaymentBalancePreview);
 }
 $('payment-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -403,7 +429,12 @@ $('payment-form').addEventListener('submit', async event => {
   }
   const date = $('payment-date').value;
   if (!date) { status('payment-status', 'Informe a data do pagamento.', true); return; }
-  const confirmation = `Confirmar pagamento de ${money(amount)} da fatura ${monthLabel(competence)} com a conta ${$('payment-account').selectedOptions[0].textContent}? O saldo bancário será reduzido.`;
+  const currentCents = calculatedAccountBalanceCents(accountId);
+  const projectedCents = currentCents === null ? null : currentCents - amountCents;
+  const balanceMessage = projectedCents === null
+    ? 'Não foi possível calcular o saldo atual. Confira a conta antes de confirmar.'
+    : `Saldo atual: ${money(currentCents / 100)}. Saldo após pagamento: ${money(projectedCents / 100)}.${projectedCents < 0 ? ' ATENÇÃO: a conta ficará negativa, mas o pagamento é permitido.' : ''}`;
+  const confirmation = `Confirmar pagamento de ${money(amount)} da fatura ${monthLabel(competence)} com a conta ${$('payment-account').selectedOptions[0].textContent}?\n\n${balanceMessage}`;
   if (!window.confirm(confirmation)) return;
   const button = $('payment-save-button');
   button.disabled = true;

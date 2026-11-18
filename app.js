@@ -12,6 +12,7 @@ const dateToday = () => {
 
 $('opening-date').value = dateToday();
 $('movement-date').value = dateToday();
+$('transfer-date').value = dateToday();
 let cachedAccounts = [];
 let cachedMovements = [];
 let recovering = false;
@@ -56,8 +57,8 @@ async function loadAccounts() {
   if (error) { status('account-status', `Erro ao consultar contas: ${error.message}`, true); return; }
   cachedAccounts = data || [];
   const { data: movements, error: movementError } = await supabase.from('movimentacoes_financeiras')
-    .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria')
-    .in('tipo', ['receita', 'despesa']).order('data_movimentacao', { ascending: false }).limit(1000);
+    .select('id,conta_id,tipo,descricao,valor,data_movimentacao,categoria,direcao_transferencia,transferencia_id')
+    .in('tipo', ['receita', 'despesa', 'transferencia']).order('data_movimentacao', { ascending: false }).limit(1000);
   if (movementError) {
     status('movement-list-status', `Erro ao consultar movimentações: ${movementError.message}`, true);
     cachedMovements = [];
@@ -73,6 +74,23 @@ async function loadAccounts() {
     const option = document.createElement('option'); option.value = a.id; option.textContent = a.nome; picker.append(option);
   }
   if (cachedAccounts.some(a => a.id === previous && a.ativa)) picker.value = previous;
+  const active = cachedAccounts.filter(a => a.ativa);
+  for (const id of ['transfer-from', 'transfer-to']) {
+    const select = $(id);
+    const old = select.value;
+    select.replaceChildren();
+    for (const a of active) {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = a.nome;
+      select.append(opt);
+    }
+    if (active.some(a => a.id === old)) select.value = old;
+  }
+  if ($('transfer-from').value === $('transfer-to').value && active.length > 1) {
+    $('transfer-to').value = active.find(a => a.id !== $('transfer-from').value).id;
+  }
+  $('transfer-save-button').disabled = active.length < 2;
   $('movement-save-button').disabled = !picker.options.length;
   const host = $('accounts'); host.replaceChildren();
   if (!cachedAccounts.length) { status('account-status', 'Nenhuma conta cadastrada.'); $('movements').replaceChildren(); return; }
@@ -84,7 +102,7 @@ async function loadAccounts() {
   const body = document.createElement('tbody');
   for (const a of cachedAccounts) {
     const row = document.createElement('tr');
-    const cents = Math.round(Number(a.saldo_inicial) * 100) + cachedMovements.filter(m => m.conta_id === a.id).reduce((total,m) => total + (m.tipo === 'receita' ? 1 : -1) * Math.round(Number(m.valor) * 100), 0);
+    const cents = Math.round(Number(a.saldo_inicial) * 100) + cachedMovements.filter(m => m.conta_id === a.id).reduce((total,m) => total + (m.tipo === 'receita' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'entrada') ? 1 : -1) * Math.round(Number(m.valor) * 100), 0);
     for (const value of [a.nome + (a.instituicao ? ' — ' + a.instituicao : ''), a.tipo, movementError ? 'Indisponível' : money(cents / 100)]) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
     body.append(row);
   }
@@ -98,11 +116,47 @@ async function loadAccounts() {
   for (const m of cachedMovements.slice(0,50)) {
     const row = document.createElement('tr');
     const a = cachedAccounts.find(a => a.id === m.conta_id);
-    for (const value of [m.data_movimentacao?.split('-').reverse().join('/') || '', a?.nome || 'Conta não encontrada', m.descricao, m.tipo === 'receita' ? 'Receita' : 'Despesa', `${m.tipo === 'despesa' ? '−' : '+'} ${money(m.valor)}`]) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
+    for (const value of [m.data_movimentacao?.split('-').reverse().join('/') || '', a?.nome || 'Conta não encontrada', m.descricao, m.tipo === 'transferencia' ? (m.direcao_transferencia === 'entrada' ? 'Transferência recebida' : 'Transferência enviada') : m.tipo === 'receita' ? 'Receita' : 'Despesa', `${m.tipo === 'despesa' || (m.tipo === 'transferencia' && m.direcao_transferencia === 'saida') ? '−' : '+'} ${money(m.valor)}`]) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
     mb.append(row);
   }
   mt.append(mb); list.append(mt);
 }
+
+$('transfer-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('transfer-save-button');
+  const from = $('transfer-from').value;
+  const to = $('transfer-to').value;
+  const value = Number($('transfer-value').value);
+  if (!from || !to || from === to) {
+    status('transfer-status', 'Selecione duas contas diferentes.', true); return;
+  }
+  if (!Number.isFinite(value) || value <= 0 || Math.abs(value * 100 - Math.round(value * 100)) > 1e-7) {
+    status('transfer-status', 'Informe um valor positivo com até duas casas decimais.', true); return;
+  }
+  if (!cachedAccounts.some(a => a.id === from && a.ativa) || !cachedAccounts.some(a => a.id === to && a.ativa)) {
+    status('transfer-status', 'Selecione duas contas ativas.', true); return;
+  }
+  button.disabled = true;
+  status('transfer-status', 'Registrando transferência...');
+  try {
+    const { error } = await supabase.rpc('transferir_entre_contas', {
+      p_conta_origem: from,
+      p_conta_destino: to,
+      p_valor: value,
+      p_data: $('transfer-date').value,
+      p_descricao: $('transfer-description').value.trim() || 'Transferência entre contas'
+    });
+    if (error) throw error;
+    $('transfer-value').value = '';
+    status('transfer-status', 'Transferência registrada com sucesso.');
+    await loadAccounts();
+  } catch (error) {
+    status('transfer-status', `Erro na transferência: ${error.message}`, true);
+  } finally {
+    button.disabled = cachedAccounts.filter(a => a.ativa).length < 2;
+  }
+});
 
 $('movement-form').addEventListener('submit', async event => {
   event.preventDefault();
